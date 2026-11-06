@@ -2,11 +2,16 @@ import flet as ft
 import random
 import json
 import os
+import csv
+import io
+import urllib.request
 
 # مسار الحفظ الدائم (يعمل على الموبايل والكمبيوتر)
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA", ".")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 DATA_FILE = os.path.join(STORAGE_DIR, "game_data.json")
+BASE_CATEGORIES = ["الكل", "دين", "تاريخ", "جغرافيا", "علوم", "عامة", "رياضة", "فن وثقافة"]
+GOOGLE_SHEET_ID = "1qB1l9FtL8rtzlzXne5sBbFShuAkfSpKgh2jM4W3Yc0o"
 
 # مسار بنك الأسئلة الأولي المدمج مع الكود
 INITIAL_BANK_FILE = os.path.join(os.path.dirname(__file__), "initial_questions.json")
@@ -50,10 +55,10 @@ def main(page: ft.Page):
             {"name": "محمد", "score": 0}
         ],
         "questions": [
-            {"q": "ما هو الكوكب الذي يُسمى بالكوكب الأحمر؟", "a": "المريخ", "used": False},
-            {"q": "كم عدد لاعبي فريق كرة القدم داخل الملعب؟", "a": "11 لاعب", "used": False},
-            {"q": "ما هي أكبر قارة في العالم من حيث المساحة؟", "a": "آسيا", "used": False}
-        ],
+          {"q": "ما هو الكوكب الذي يُسمى بالكوكب الأحمر؟", "a": "المريخ", "category": "علوم", "used": False},
+          {"q": "كم عدد لاعبي فريق كرة القدم داخل الملعب؟", "a": "11 لاعب", "category": "رياضة", "used": False},
+          {"q": "ما هي أكبر قارة في العالم من حيث المساحة؟", "a": "آسيا", "category": "جغرافيا", "used": False}
+      ],
         "target_score": 5
     }
 
@@ -114,6 +119,29 @@ def main(page: ft.Page):
     # =========================================================================
     # 1. عناصر ومنطق شاشة اللعب (Game Arena)
     # =========================================================================
+    def get_available_categories():
+        cats = list(BASE_CATEGORIES)
+        for q in questions:
+            c = q.get("category", "عامة").strip()
+            if c and c not in cats:
+                cats.append(c)
+        return cats
+
+    category_dropdown = ft.Dropdown(
+        label="اختر تصنيف السؤال",
+        value="الكل",
+        width=200,
+        options=[ft.dropdown.Option(c) for c in get_available_categories()]
+    )
+
+    category_badge = ft.Container(
+        padding=ft.Padding.symmetric(horizontal=12, vertical=4),
+        bgcolor=ft.Colors.TEAL_800,
+        border_radius=12,
+        visible=False,
+        content=ft.Text("", size=13, color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD)
+    )
+
     question_text = ft.Text(
         current_question["q"],
         size=20,
@@ -136,18 +164,27 @@ def main(page: ft.Page):
     players_play_column = ft.Column(spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
     def pick_random_question(e=None):
-        available = [i for i, q in enumerate(questions) if not q.get("used", False)]
+        selected_cat = category_dropdown.value or "الكل"
+        available = [
+            i for i, q in enumerate(questions)
+            if not q.get("used", False) and (selected_cat == "الكل" or q.get("category", "عامة") == selected_cat)
+        ]
         if not available:
-            question_text.value = "انتهت الأسئلة المتاحة! اضغط على (إعادة تفعيل كل الأسئلة) بالأسفل أو أضف أسئلة جديدة."
+            question_text.value = f"انتهت الأسئلة المتاحة في قسم ({selected_cat})! غيّر التصنيف أو اضغط (إعادة تفعيل كل الأسئلة)."
             answer_text.visible = False
+            category_badge.visible = False
         else:
             chosen_idx = random.choice(available)
             questions[chosen_idx]["used"] = True
             current_question["q"] = questions[chosen_idx]["q"]
             current_question["a"] = questions[chosen_idx]["a"]
+            q_cat = questions[chosen_idx].get("category", "عامة")
+
             question_text.value = current_question["q"]
             answer_text.value = f"الإجابة: {current_question['a']}"
             answer_text.visible = False
+            category_badge.content.value = f"التصنيف: {q_cat}"
+            category_badge.visible = True
             save_data()
         page.update()
 
@@ -172,10 +209,7 @@ def main(page: ft.Page):
 
     def show_winner_dialog(winner_name):
         def start_new_round(e):
-            try:
-                page.close(dialog)
-            except Exception:
-                dialog.open = False
+            dialog.open = False
             reset_round_scores()
             pick_random_question()
             page.update()
@@ -198,53 +232,66 @@ def main(page: ft.Page):
             ],
             actions_alignment=ft.MainAxisAlignment.CENTER,
         )
-        try:
-            page.open(dialog)
-        except Exception:
-            page.dialog = dialog
-            dialog.open = True
-            page.update()
+        # الطريقة المضمونة لفتح الـ Dialog في Flet الحديث
+        page.overlay.clear()
+        page.overlay.append(dialog)
+        dialog.open = True
+        page.update()
 
     def change_score(index, delta):
-        players[index]["score"] += delta
+        players[index]["score"] += int(delta)
         save_data()
         render_play_players()
-        page.update()
-        if players[index]["score"] >= target_score:
+        # التأكد من المقارنة كأرقام صحيحة (int)
+        if int(players[index]["score"]) >= int(target_score):
             show_winner_dialog(players[index]["name"])
-
+        else:
+            page.update()
+            
     def render_play_players():
         players_play_column.controls.clear()
         target_badge.value = f"هدف الجولة: {target_score} نقاط"
+        
+        # إنشاء شبكة متجاوبة تقسم الصف إلى عمودين (كل بطاقة تأخذ 6 من 12)
+        grid_row = ft.ResponsiveRow(spacing=8, run_spacing=8)
+        
         for i, p in enumerate(players):
             card = ft.Card(
+                col=6,  # 6 من 12 تعني عمودين في كل صف
                 content=ft.Container(
-                    padding=12,
-                    content=ft.Row(
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    padding=8,
+                    content=ft.Column(
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=6,
                         controls=[
-                            ft.Text(p["name"], size=18, weight=ft.FontWeight.BOLD, expand=True),
+                            ft.Text(
+                                p["name"],
+                                size=16,
+                                weight=ft.FontWeight.BOLD,
+                                text_align=ft.TextAlign.CENTER,
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS
+                            ),
                             ft.Row(
-                                spacing=10,
+                                alignment=ft.MainAxisAlignment.CENTER,
+                                spacing=4,
                                 controls=[
                                     ft.IconButton(
                                         icon=ft.Icons.REMOVE_CIRCLE,
                                         icon_color=ft.Colors.RED_400,
-                                        icon_size=32,
-                                        tooltip="إجابة خاطئة (-1)",
+                                        icon_size=26,
                                         on_click=lambda e, idx=i: change_score(idx, -1)
                                     ),
                                     ft.Container(
-                                        padding=ft.Padding.symmetric(horizontal=14, vertical=6),
+                                        padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                                         bgcolor=ft.Colors.BLUE_GREY_800,
                                         border_radius=8,
-                                        content=ft.Text(str(p["score"]), size=20, weight=ft.FontWeight.BOLD)
+                                        content=ft.Text(str(p["score"]), size=18, weight=ft.FontWeight.BOLD)
                                     ),
                                     ft.IconButton(
                                         icon=ft.Icons.ADD_CIRCLE,
                                         icon_color=ft.Colors.GREEN_400,
-                                        icon_size=32,
-                                        tooltip="إجابة صحيحة (+1)",
+                                        icon_size=26,
                                         on_click=lambda e, idx=i: change_score(idx, 1)
                                     ),
                                 ]
@@ -253,8 +300,9 @@ def main(page: ft.Page):
                     )
                 )
             )
-            players_play_column.controls.append(card)
-
+            grid_row.controls.append(card)
+            
+        players_play_column.controls.append(grid_row)
     play_view = ft.Column(
         expand=True,
         controls=[
@@ -270,6 +318,7 @@ def main(page: ft.Page):
                     content=ft.Column(
                         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
                         controls=[
+                            ft.Row([category_dropdown, category_badge], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
                             question_text,
                             answer_text,
                             ft.Divider(),
@@ -388,35 +437,97 @@ def main(page: ft.Page):
     # =========================================================================
     # 3. عناصر ومنطق شاشة بنك الأسئلة (Questions Bank)
     # =========================================================================
+# =========================================================================
+  # 3. عناصر ومنطق شاشة بنك الأسئلة + ربط Google Sheets
+  # =========================================================================
+    # ضع الـ ID الخاص بملف Google Sheets هنا بين علامتي التنصيص
+
     new_q_input = ft.TextField(label="اكتب السؤال هنا", multiline=True)
-    new_a_input = ft.TextField(label="الإجابة الصحيحة")
+    new_a_input = ft.TextField(label="الإجابة الصحيحة", expand=True)
+    new_cat_input = ft.Dropdown(
+        label="التصنيف",
+        value="عامة",
+        width=130,
+        options=[ft.dropdown.Option(c) for c in BASE_CATEGORIES if c != "الكل"]
+    )
     questions_list_column = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, expand=True)
+
+    def refresh_category_dropdown():
+        category_dropdown.options = [ft.dropdown.Option(c) for c in get_available_categories()]
 
     def add_question(e):
         q_val = new_q_input.value.strip()
         a_val = new_a_input.value.strip()
+        cat_val = new_cat_input.value or "عامة"
         if q_val and a_val:
-            questions.append({"q": q_val, "a": a_val, "used": False})
+            questions.append({"q": q_val, "a": a_val, "category": cat_val, "used": False})
             new_q_input.value = ""
             new_a_input.value = ""
             save_data()
+            refresh_category_dropdown()
             render_questions_bank()
             notify("تمت إضافة السؤال بنجاح!")
             page.update()
 
+    def sync_from_google_sheets(e):
+        if not GOOGLE_SHEET_ID or GOOGLE_SHEET_ID == "PUT_YOUR_GOOGLE_SHEET_ID_HERE":
+            notify("يرجى وضع الـ ID الخاص بشيت جوجل في متغير GOOGLE_SHEET_ID أولاً!")
+            return
+
+        sheet_csv_url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
+        try:
+            req = urllib.request.Request(sheet_csv_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                csv_text = response.read().decode('utf-8-sig')
+
+            reader = csv.DictReader(io.StringIO(csv_text))
+            existing_q_texts = {q["q"]: q for q in questions}
+            added_count = 0
+            updated_count = 0
+
+            for row in reader:
+                q_text = (row.get("q") or "").strip()
+                a_text = (row.get("a") or "").strip()
+                cat_text = (row.get("category") or "عامة").strip() or "عامة"
+
+                if q_text and a_text:
+                    if q_text not in existing_q_texts:
+                        questions.append({
+                            "q": q_text,
+                            "a": a_text,
+                            "category": cat_text,
+                            "used": False
+                        })
+                        added_count += 1
+                    else:
+                        # تحديث الإجابة أو التصنيف لو عدلتها في الشيت
+                        existing_q_texts[q_text]["a"] = a_text
+                        existing_q_texts[q_text]["category"] = cat_text
+                        updated_count += 1
+
+            save_data()
+            refresh_category_dropdown()
+            render_questions_bank()
+            notify(f"تم سحب {added_count} سؤال جديد وتحديث {updated_count} من Google Sheets!")
+            page.update()
+        except Exception as ex:
+            notify("فشل الاتصال بالشيت! تأكد من جعل الشيت (أي شخص لديه الرابط) ومن اتصالك بالإنترنت.")
+
     def delete_question(index):
         questions.pop(index)
         save_data()
+        refresh_category_dropdown()
         render_questions_bank()
         page.update()
 
     def render_questions_bank():
         questions_list_column.controls.clear()
         for i, q in enumerate(questions):
+            cat_label = q.get("category", "عامة")
             questions_list_column.controls.append(
                 ft.Card(
                     content=ft.ListTile(
-                        title=ft.Text(q["q"]),
+                        title=ft.Text(f"[{cat_label}] {q['q']}"),
                         subtitle=ft.Text(f"الإجابة: {q['a']}", color=ft.Colors.GREEN_400),
                         trailing=ft.IconButton(
                             icon=ft.Icons.DELETE,
@@ -433,14 +544,21 @@ def main(page: ft.Page):
         controls=[
             ft.Text("إضافة سؤال جديد", size=20, weight=ft.FontWeight.BOLD),
             new_q_input,
-            new_a_input,
+            ft.Row([new_a_input, new_cat_input]),
             make_btn("إضافة لبنك الأسئلة", icon=ft.Icons.SAVE, on_click=add_question, width=float("inf")),
+            make_btn(
+                "تحديث الأسئلة من Google Sheets ☁️",
+                icon=ft.Icons.CLOUD_SYNC,
+                on_click=sync_from_google_sheets,
+                bgcolor=ft.Colors.GREEN_800,
+                color=ft.Colors.WHITE,
+                width=float("inf")
+            ),
             ft.Divider(),
-            ft.Text("الأسئلة المضافة:", size=16, weight=ft.FontWeight.BOLD),
+            ft.Text(f"الأسئلة المضافة ({len(questions)}):", size=16, weight=ft.FontWeight.BOLD),
             questions_list_column
         ]
     )
-
     # =========================================================================
     # شريط التنقل السفلي (Navigation Bar)
     # =========================================================================
